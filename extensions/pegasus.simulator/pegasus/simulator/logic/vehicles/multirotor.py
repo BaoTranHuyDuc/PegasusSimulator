@@ -20,6 +20,11 @@ from pegasus.simulator.logic.dynamics import LinearDrag
 from pegasus.simulator.logic.thrusters import QuadraticThrustCurve
 from pegasus.simulator.logic.sensors import Barometer, IMU, Magnetometer, GPS
 
+#Wind setup
+from pegasus.simulator.logic.wind import GustWind
+from .helper_function import quat_to_rotation_matrix
+
+
 class MultirotorConfig:
     """
     A data class that is used for configuring a Multirotor
@@ -54,6 +59,10 @@ class MultirotorConfig:
         # or your own custom Backend implementation!
         self.backends = [PX4MavlinkBackend(config=PX4MavlinkBackendConfig())]
 
+        # Wind Configuration
+        self.wind = GustWind(mean_velocity=[2.0, 0.0, 0.0], 
+                             gust_amplitude=[15, 0.0, 0.0], 
+                             gust_frequency=0.2)
 
 class Multirotor(Vehicle):
     """Multirotor class - It defines a base interface for creating a multirotor
@@ -86,6 +95,9 @@ class Multirotor(Vehicle):
         # 2. Setup the dynamics of the system - get the thrust curve of the vehicle from the configuration
         self._thrusters = config.thrust_curve
         self._drag = config.drag
+
+        # 3. Setup the wind model
+        self._wind = config.wind
 
     def start(self):
         """In this case we do not need to do anything extra when the simulation starts"""
@@ -131,6 +143,38 @@ class Multirotor(Vehicle):
 
         # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
         self.apply_torque([0.0, 0.0, rolling_moment], "/body")
+
+        # --- WIND LOGIC START ---
+        
+        # 1. Update the wind model
+        wind_vel_world = self._wind.update(self._state, dt)
+
+        # 2. Get Rotation Matrix from World to Body
+        # Note: self._state.attitude is usually [qx, qy, qz, qw] in Pegasus
+        R_body_to_world = quat_to_rotation_matrix(self._state.attitude)
+        
+        # The transpose of a rotation matrix is its inverse (World to Body)
+        R_world_to_body = R_body_to_world.T
+        
+        # 3. Transform wind to body frame
+        wind_vel_body = R_world_to_body @ np.array(wind_vel_world)
+
+        # 4. Calculate relative airspeed in body frame
+        # V_air = V_ground_body - V_wind_body
+        original_body_vel = np.array(self._state.linear_body_velocity)
+        relative_airspeed = original_body_vel - wind_vel_body
+        
+        # 5. Temporarily override state to use Drag math on relative airspeed
+        self._state.linear_body_velocity = relative_airspeed
+        drag_force = self._drag.update(self._state, dt)
+        
+        # Restore the actual ground velocity to the state object
+        self._state.linear_body_velocity = original_body_vel 
+
+        # 6. Apply the force
+        self.apply_force(drag_force, body_part="/body")
+
+        # --- WIND LOGIC END ---
 
         # Compute the total linear drag force to apply to the vehicle's body frame
         drag = self._drag.update(self._state, dt)

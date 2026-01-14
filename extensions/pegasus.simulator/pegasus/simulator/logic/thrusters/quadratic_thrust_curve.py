@@ -93,6 +93,7 @@ class QuadraticThrustCurve(ThrustCurve):
                 self.min_rotor_velocity[i], np.minimum(self._input_reference[i], self.max_rotor_velocity[i])
             )
 
+
             # Set the force using a quadratic thrust curve
             self._force[i] = self._rotor_constant[i] * np.power(self._velocity[i], 2)
 
